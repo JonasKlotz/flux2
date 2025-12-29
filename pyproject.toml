@@ -17,6 +17,10 @@ dependencies = [
   "safetensors==0.4.5",
   "fire==0.7.1",
   "openai==2.8.1",
+  "huggingface-hub>=0.36.0",
+  "pandas>=2.3.3",
+  "scikit-learn>=1.7.2",
+  "rootutils>=1.0.7",
 ]
 
 [project.optional-dependencies]
@@ -42,3 +46,8 @@ quote-style = "double"
 indent-style = "space"
 line-ending = "auto"
 docstring-code-format = true
+
+[tool.uv.workspace]
+members = [
+    "flux2",
+]

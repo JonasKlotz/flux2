@@ -43,7 +43,7 @@ def load_flow_model(model_name: str, debug_mode: bool = False, device: str | tor
             except huggingface_hub.errors.RepositoryNotFoundError:
                 print(
                     f"Failed to access the model repository. Please check your internet "
-                    f"connection and make sure you've access to {config['repo_id']}."
+                    f"connection and make sure you've access to {config['repo_id']}. "
                     "Stopping."
                 )
                 sys.exit(1)

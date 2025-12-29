@@ -11,6 +11,8 @@ import torch
 from einops import rearrange
 from PIL import ExifTags, Image
 
+os.environ["FLUX2_MODEL_PATH"] = "/data/jonas/flux2/flux2-dev.safetensors"
+
 from flux2.openrouter_api_client import DEFAULT_SAMPLING_PARAMS, OpenRouterAPIClient
 from flux2.sampling import (
     batched_prc_img,
@@ -214,7 +216,7 @@ def main(
     single_eval: bool = False,
     prompt: str | None = None,
     debug_mode: bool = False,
-    cpu_offloading: bool = False,
+    cpu_offloading: bool = True,
     **overwrite,
 ):
     assert (
@@ -241,7 +243,7 @@ def main(
     if prompt is not None:
         cfg.prompt = prompt
     print_config(cfg)
-
+    img = None
     while True:
         if not single_eval:
             try:
@@ -516,7 +518,7 @@ def main(
             print("  The model is still loaded. Please fix the error and try again.\n", file=sys.stderr)
 
         if single_eval:
-            break
+            return img
 
 
 if __name__ == "__main__":
