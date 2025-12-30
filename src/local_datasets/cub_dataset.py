@@ -145,7 +145,7 @@ class CUBDataset(Dataset):
         labels_txt = os.path.join(root, "image_class_labels.txt")
         class_names_txt = os.path.join(root, "classes.txt")
         class_attributes_txt = os.path.join(
-            root, "attributes", "class_attribute_labels_continuous.txt"
+            root, "attributes", f"class_attribute_labels_continuous_recal_{split}.txt"
         )
         attributes_names_txt = os.path.join(root, "attributes", "attributes.txt")
 
