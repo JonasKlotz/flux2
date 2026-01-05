@@ -357,64 +357,6 @@ def export_reference_images(
 
     return index_df
 
-def print_reference_image_stats(ref_index_df: pd.DataFrame) -> None:
-    if ref_index_df.empty:
-        print("Reference index is empty.")
-        return
-
-    n_images = len(ref_index_df)
-    n_classes = ref_index_df["class_name"].nunique()
-    n_attrs = ref_index_df["topk_attr"].nunique()
-    n_pairs = (
-        ref_index_df[["class_name", "topk_attr"]]
-        .drop_duplicates()
-        .shape[0]
-    )
-
-    per_pair = (
-        ref_index_df
-        .groupby(["class_name", "topk_attr"])
-        .size()
-    )
-
-    per_class = (
-        ref_index_df
-        .groupby("class_name")
-        .size()
-    )
-
-    per_attr = (
-        ref_index_df
-        .groupby("topk_attr")
-        .size()
-    )
-
-    print("Reference image statistics")
-    print("--------------------------")
-    print(f"Total images saved           : {n_images}")
-    print(f"Unique classes               : {n_classes}")
-    print(f"Unique reference attributes  : {n_attrs}")
-    print(f"Class–attribute pairs        : {n_pairs}")
-    print()
-    print("Images per (class, attribute)")
-    print(f"  min / mean / max            : "
-          f"{per_pair.min()} / {per_pair.mean():.2f} / {per_pair.max()}")
-    print()
-    print("Images per class")
-    print(f"  min / mean / max            : "
-          f"{per_class.min()} / {per_class.mean():.2f} / {per_class.max()}")
-    print()
-    print("Images per attribute")
-    print(f"  min / mean / max            : "
-          f"{per_attr.min()} / {per_attr.mean():.2f} / {per_attr.max()}")
-    print()
-    print("Top 5 most frequent attributes:")
-    print(per_attr.sort_values(ascending=False).head(5))
-    print()
-    print("Top 5 classes with most reference images:")
-    print(per_class.sort_values(ascending=False).head(5))
-
-
 # usage
 
 #############################################################
@@ -452,6 +394,11 @@ def main():
         matches_df=matches_df,
         cub_dataset=CUB_dataset,
         assets_dir=assets_dir,
+    )
+    # save  df
+    save_df(
+        ref_index_df,
+        Path(assets_dir) / "reference_images_index.csv"
     )
     print(ref_index_df.head(10))
 
