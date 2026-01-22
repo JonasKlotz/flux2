@@ -23,6 +23,7 @@ class CUBDataset(Dataset):
         return_segmentation=False,
         val_split=0.15,
         seed=42,
+        only_attributes_with_high_certainty=False,
     ):
         self.root = root
         self.transform = transform
@@ -37,6 +38,8 @@ class CUBDataset(Dataset):
             root, "attributes", f"class_attribute_labels_continuous_recal_{split}.txt"
         )
         attributes_names_txt = os.path.join(root, "attributes", "attributes.txt")
+        attr_labels_txt = os.path.join(root, "attributes", "image_attribute_labels.txt")
+
 
         images = pd.read_csv(images_txt, sep=" ", names=["img_id", "filepath"])
         split_flags = pd.read_csv(split_txt, sep=" ", names=["img_id", "is_train"])
@@ -47,16 +50,22 @@ class CUBDataset(Dataset):
         self.class_names["class_name"] = self.class_names["class_name"].apply(
             lambda s: s.split(".", 1)[1]
         )
-        self.attribute_names = pd.read_csv(
+        attribute_names_df = pd.read_csv(
             attributes_names_txt, sep=" ", header=None, names=["attr_id", "attr_name"]
         )
+        self.attribute_names = {}
+        for _, row in attribute_names_df.iterrows():
+            self.attribute_names[row["attr_id"]-1] = row["attr_name"]
 
-        self.class_attributes = pd.read_csv(class_attributes_txt, sep=" ", header=None)
+        if split != "all":
+            self.class_attributes = pd.read_csv(class_attributes_txt, sep=" ", header=None)
         df = images.merge(split_flags, on="img_id").merge(labels, on="img_id")
 
         # official train or test partition
         if split in ("train", "val"):
             df = df[df["is_train"] == 1].reset_index(drop=True)
+        elif split == "all":
+            pass  # use all data
         else:
             df = df[df["is_train"] == 0].reset_index(drop=True)
 
@@ -90,14 +99,15 @@ class CUBDataset(Dataset):
                 aid, name = line.strip().split(" ", 1)
                 self.attr_map[int(aid)] = name
 
-        attr_labels_txt = os.path.join(root, "attributes", "image_attribute_labels.txt")
         records = []
         with open(attr_labels_txt, "r") as f:
             reader = csv.reader(f, delimiter=" ", skipinitialspace=True)
             for row in reader:
                 if len(row) != 5:
                     continue
-                img_id, a_id, present, _, _ = row
+                img_id, a_id, present, certainty, _ = row
+                if only_attributes_with_high_certainty and int(certainty) < 3:
+                    present = 0
                 records.append((int(img_id), self.attr_map[int(a_id)], int(present)))
         attr_df = pd.DataFrame(
             records, columns=["img_id", "attribute_name", "is_present"]
@@ -108,8 +118,10 @@ class CUBDataset(Dataset):
         # replace class_id with class_name from class_names df
         mapping = self.class_names.set_index("class_id")["class_name"]
         self.all_info_df["class_name"] = self.all_info_df["class_id"].map(mapping)
-
-        matrix = attr_df.pivot(
+        # check duplicates
+        if attr_df.duplicated().any():
+            attr_df = attr_df.drop_duplicates()
+        matrix = attr_df.reset_index(drop=True).pivot(
             index="img_id", columns="attribute_name", values="is_present"
         ).fillna(0)
         self.attr_matrix = matrix
@@ -147,6 +159,11 @@ class CUBDataset(Dataset):
 
         return img, label, attrs, idx
 
+    def get_image_path(self, idx):
+        # map dataset‐local idx back to the original row in self.data
+        row = self.data.iloc[idx]
+        img_path = os.path.join(self.root, "images", row["filepath"])
+        return img_path
 
     def label_to_class_name(self, label_tensor):
         class_idx = torch.argmax(label_tensor).item() + 1
@@ -158,7 +175,102 @@ class CUBDataset(Dataset):
     def attributes_to_names(self, attrs_tensor, threshold=0.5):
         # Find indices where attribute is present (value == 1) and map to names
         present_idx = (attrs_tensor == 1).nonzero(as_tuple=True)[0].tolist()
-        return [
-            self.attribute_names[self.attribute_names["attr_id"] == i + 1]["attr_name"].values[0]
-            for i in present_idx
-        ]
+        return [self.attribute_names[i] for i in present_idx]
+
+
+    def get_info_from_image_path(self, image_path: str):
+        """
+        Given an absolute image path pointing to a CUB image,
+        return img_id, relative filepath, class id/name, and the full attribute vector.
+        """
+
+        image_path = os.path.abspath(image_path)
+        images_root = os.path.join(self.root, "images")
+
+        if not image_path.startswith(images_root):
+            raise ValueError(f"Image path not inside CUB images directory: {image_path}")
+
+        rel_path = os.path.relpath(image_path, images_root)
+
+        # Find the unique img_id + class_id for this filepath.
+        # Use the per-image table self.data (unique per image), not self.all_info_df (one row per attribute).
+        hits = self.data[self.data["filepath"] == rel_path]
+
+        # If the file is not inside the current split, fall back to the full images/labels table via all_info_df.
+        # all_info_df is long, so we must deduplicate by img_id/class_id.
+        if len(hits) == 0:
+            hits = (
+                self.all_info_df[self.all_info_df["img_id"].isin(
+                    self.all_info_df.loc[
+                        self.all_info_df["img_id"].isin(
+                            self.all_info_df["img_id"].unique()
+                        ),
+                        "img_id",
+                    ]
+                )]
+            )
+            # better: resolve via images.txt merge result implicitly stored in self.all_info_df is not possible here,
+            # because filepath was dropped. So we cannot resolve by rel_path from all_info_df.
+            # Therefore: fail loudly with an actionable message.
+            raise RuntimeError(
+                f"Filepath not found in current dataset split: {rel_path}. "
+                f"Instantiate CUBDataset with split='train' or split='test' that contains this image, "
+                f"or store a global filepath->img_id map."
+            )
+
+        if len(hits) != 1:
+            raise RuntimeError(
+                f"Expected exactly 1 match for filepath '{rel_path}', got {len(hits)}."
+            )
+
+        row = hits.iloc[0]
+        img_id = int(row["img_id"])
+        class_id = int(row["class_id"])
+
+        # class name lookup
+        class_name = (
+            self.class_names.loc[self.class_names["class_id"] == class_id, "class_name"]
+            .values[0]
+        )
+
+        # attribute vector (unique per img_id)
+        if img_id not in self.attr_matrix.index:
+            raise RuntimeError(f"Attribute matrix has no entry for img_id={img_id} ({rel_path}).")
+
+        attrs = torch.tensor(self.attr_matrix.loc[img_id].values, dtype=torch.float32)
+        attr_names = self.attribute_names["attr_name"].tolist()
+
+        return {
+            "img_id": img_id,
+            "filepath": rel_path,
+            "class_id": class_id,
+            "class_name": class_name,
+            "attributes": attrs,
+            "attribute_names": attr_names,
+        }
+
+
+if __name__ == "__main__":
+    # Example usage
+    cub_data_dir = "/data/jonas/CUB"
+    CUB_dataset = CUBDataset(
+        cub_data_dir,
+        split="train",
+        transform=None,
+        return_segmentation=False,
+    )
+    import matplotlib.pyplot as plt
+
+    for i in range(len(CUB_dataset)):
+
+        img, label, attrs, idx = CUB_dataset[i]
+        print(f"Image shape: {img.size}")
+        attr_names = CUB_dataset.attributes_to_names(attrs)
+        class_name = CUB_dataset.label_to_class_name(label)
+
+        # plot image
+
+        plt.imshow(img)
+        plt.title(f"Class: {class_name}\nAttributes: {', '.join(attr_names)}")
+        plt.axis("off")
+        plt.show()

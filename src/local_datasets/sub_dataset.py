@@ -1,13 +1,13 @@
 import pickle
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Union, Optional
+from typing import Any, Dict, List, Union
 
 import numpy as np
 import pandas as pd
-import torch
 from datasets import load_dataset
 from pandas import DataFrame
 
+from io_utils import ensure_dir, save_df
 from local_datasets.cub_dataset import CUBDataset
 
 
@@ -64,46 +64,6 @@ def get_class_attrs(CUB_dataset: CUBDataset) -> DataFrame:
     class_attributes_df["class_name"] = class_names
     class_attributes_df.columns.name = "attribute"
     return class_attributes_df
-
-
-# -----------------------------
-# IO utilities
-# -----------------------------
-def ensure_dir(path: Union[str, Path]) -> Path:
-    p = Path(path)
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-
-def load_df_if_exists(path: Union[str, Path]) -> Optional[pd.DataFrame]:
-    p = Path(path)
-    if not p.exists():
-        return None
-    try:
-        if p.suffix.lower() in [".parquet"]:
-            return pd.read_parquet(p)
-        if p.suffix.lower() in [".csv"]:
-            return pd.read_csv(p)
-        if p.suffix.lower() in [".pkl", ".pickle"]:
-            return pd.read_pickle(p)
-        raise ValueError(f"Unsupported dataframe format: {p.suffix}")
-    except Exception as e:
-        raise RuntimeError(f"Failed to load cached dataframe at {p}: {e}") from e
-
-
-def save_df(df: pd.DataFrame, path: Union[str, Path]) -> None:
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    if p.suffix.lower() == ".parquet":
-        df.to_parquet(p, index=False)
-    elif p.suffix.lower() == ".csv":
-        df.to_csv(p, index=False)
-    elif p.suffix.lower() in [".pkl", ".pickle"]:
-        df.to_pickle(p)
-    else:
-        raise ValueError(f"Unsupported dataframe format: {p.suffix}")
-
-
 
 
 def filter_cub_df_to_sub_birds(df: pd.DataFrame, birds_to_consider: List[str]) -> pd.DataFrame:
@@ -246,8 +206,6 @@ def compute_or_load_matches_df(
     return matches_df
 
 
-
-import os
 import shutil
 from collections import defaultdict
 from pathlib import Path
@@ -364,6 +322,7 @@ def export_reference_images(
 
 def main():
     bird_labels_path = "bird_labels.pkl"
+    assets_dir = "/home/jonas/PycharmProjects/flux2/assets/"
 
     out_dir = ensure_dir("/home/jonas/PycharmProjects/flux2/assets/")
     cache_path = out_dir / "matches_df.parquet"  # change suffix to .csv or .pkl if you prefer
@@ -389,7 +348,6 @@ def main():
     )
 
     # after you computed/loaded matches_df (and still have CUB_dataset available)
-    assets_dir = "/home/jonas/PycharmProjects/flux2/assets/"
     ref_index_df = export_reference_images(
         matches_df=matches_df,
         cub_dataset=CUB_dataset,

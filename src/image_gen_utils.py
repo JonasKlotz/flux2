@@ -54,19 +54,26 @@ def split_attr(a: str):
     return k, v
 
 
-def describe_attr(a: str) -> str:
+def describe_attr_A(a: str) -> str:
     k, v = split_attr(a)
     v_txt = ATTR_VALUE_TO_TEXT.get(v, v.replace("_", " "))
     k_txt = k.replace("has_", "").replace("_", " ")
-    return f"{k_txt} = {v_txt}"
+    if k_txt == "primary color":
+        return f"the bird's primary body color"
+    return f"'{k_txt}'"
 
+def describe_attr_B(a: str) -> str:
+    k, v = split_attr(a)
+    v_txt = ATTR_VALUE_TO_TEXT.get(v, v.replace("_", " "))
+    k_txt = k.replace("has_", "").replace("_", " ")
+    return f"'{k_txt} is {v_txt}'"
 
-def build_prompt(anchor_attr: str, target_attr: str) -> str:
+def build_prompt(anchor_attr: str, target_attr: str, class_name:str) -> str:
     # Strong, explicit counterfactual edit instruction with strict preservation constraints.
     return (
-        "Edit the input bird photograph. " # add species name?
-        f"Strongly change exactly one attribute: replace {describe_attr(anchor_attr)} with {describe_attr(target_attr)}. "
-        "Make the change unambiguous and clearly visible. "
+        f"Edit the input bird photograph of a {class_name} " # add species name?
+        f"Change exactly one attribute: replace {describe_attr_A(anchor_attr)} with {describe_attr_B(target_attr)}. "
+        "Make the change unambiguous and clearly visible. However, still make the bird look realistic and natural. "
         "Preserve the bird identity, species appearance, pose, scale, viewpoint, background, lighting, "
         "and all other colors and patterns. "
         "Do not add or remove objects. Do not change anything except the specified attribute."
