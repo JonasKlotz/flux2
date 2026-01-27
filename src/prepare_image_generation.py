@@ -1,10 +1,15 @@
+import glob
+import os
 import pickle
+import shutil
+from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, Tuple, Union
+from typing import List
 
 import numpy as np
 import pandas as pd
-from datasets import load_dataset
+from datasets import load_dataset, tqdm, DatasetDict
 from pandas import DataFrame
 
 from io_utils import ensure_dir, save_df
@@ -54,13 +59,11 @@ def load_bird_labels(path: Union[str, Path] = "bird_labels.pkl") -> Dict[Any, An
 
 def get_class_attrs(CUB_dataset: CUBDataset) -> DataFrame:
     class_attributes_df = CUB_dataset.class_attributes  # rows classes, cols attributes (after renaming)
-    attributes_df = CUB_dataset.attribute_names  # attr_id attr_name - id starts at 1
     class_df = CUB_dataset.class_names  # class_id class_name - id starts at 1
 
-    attr_names = attributes_df["attr_name"].to_numpy()
     class_names = class_df["class_name"].to_numpy()
 
-    class_attributes_df.columns = attr_names
+    class_attributes_df.columns = CUB_dataset.attribute_names
     class_attributes_df["class_name"] = class_names
     class_attributes_df.columns.name = "attribute"
     return class_attributes_df
@@ -174,8 +177,6 @@ def match_loaded_attrs_to_topk_families(
 
 
 def compute_or_load_matches_df(
-    cache_path: Union[str, Path],
-    *,
     cub,
     bird_labels_path: Union[str, Path],
     sub,
@@ -183,11 +184,6 @@ def compute_or_load_matches_df(
     banned_family: str = "has_eye_color",
     topk_clean: int = 3,
 ) -> pd.DataFrame:
-    cache_path = Path(cache_path)
-    # cached = load_df_if_exists(cache_path)
-    # if cached is not None:
-    #     return cached
-
     df_cub = get_class_attrs(cub)
 
     birds_to_consider = sub["test"].features["bird_label"].names
@@ -206,15 +202,10 @@ def compute_or_load_matches_df(
     return matches_df
 
 
-import shutil
-from collections import defaultdict
-from pathlib import Path
-from typing import Any, Dict, Tuple, Union
-
-import pandas as pd
 
 
-def save_reference_images_for_topk_attrs(
+
+def save_base_images_for_topk_attrs(
     matches_df: pd.DataFrame,
     cub_dataset: Any,
     out_root: Union[str, Path],
@@ -232,7 +223,6 @@ def save_reference_images_for_topk_attrs(
 
     required_pairs = set(
         matches_df[["class_name", "topk_attr"]]
-        .drop_duplicates()
         .itertuples(index=False, name=None)
     )
 
@@ -242,8 +232,9 @@ def save_reference_images_for_topk_attrs(
     def all_done() -> bool:
         return all(counts[p] >= max_per_attr for p in required_pairs)
 
-    for i in range(len(cub_dataset)):
+    for i in tqdm(range(len(cub_dataset))):
         if all_done():
+            print("All done!")
             break
 
         img, label, attrs, idx = cub_dataset[i]
@@ -254,9 +245,7 @@ def save_reference_images_for_topk_attrs(
         if not needed_attrs:
             continue
 
-        # recover image path exactly as in __getitem__
-        row = cub_dataset.data.iloc[idx]
-        image_path = Path(cub_dataset.root) / "images" / row["filepath"]
+        image_path = Path(cub_dataset.get_image_path(idx))
         if not image_path.exists():
             continue
 
@@ -270,7 +259,7 @@ def save_reference_images_for_topk_attrs(
             if needed_attr[0] not in attribute_names:
                 continue
 
-            dst_dir = out_root / class_name / f"{needed_attr[0]}_{needed_attr[1]}"
+            dst_dir = out_root / class_name / f"{needed_attr[0]}"
             dst_dir.mkdir(parents=True, exist_ok=True)
 
             dst_path = dst_dir / f"{counts[key]:04d}_{image_path.name}"
@@ -292,53 +281,25 @@ def save_reference_images_for_topk_attrs(
         columns=["class_name", "topk_attr", "image_src_path", "image_dst_path"],
     )
 
-def export_reference_images(
-    matches_df: pd.DataFrame,
-    cub_dataset: Any,
-    assets_dir: Union[str, Path],
-
-) -> pd.DataFrame:
-    """
-    Creates:
-      assets_dir/reference_images/<class_name>/<topk_attr>/*.jpg
-    Also saves an index dataframe for reproducibility.
-    """
-    assets_dir = Path(assets_dir)
-    out_root = assets_dir / "reference_images"
-    out_root.mkdir(parents=True, exist_ok=True)
-
-    index_df = save_reference_images_for_topk_attrs(
-        matches_df=matches_df,
-        cub_dataset=cub_dataset,
-        out_root=out_root,
-    )
-
-    return index_df
-
-# usage
-
-#############################################################
 
 
-def main():
-    bird_labels_path = "bird_labels.pkl"
-    assets_dir = "/home/jonas/PycharmProjects/flux2/assets/"
+def write_replacement_attrs(base_img_out_dir: Path):
+    dirs = glob.glob(str(base_img_out_dir / "*"))
+    class_to_attrs = {d: glob.glob(str(Path(d) / "*")) for d in sorted(dirs)}
 
-    out_dir = ensure_dir("/home/jonas/PycharmProjects/flux2/assets/")
-    cache_path = out_dir / "matches_df.parquet"  # change suffix to .csv or .pkl if you prefer
-    cub_data_dir = "/data/jonas/CUB"
-    CUB_dataset = CUBDataset(
-        cub_data_dir,
-        split="train",
-        transform=None,
-        return_segmentation=False,
-    )
-    SUB_dataset = load_dataset("Jessica-bader/SUB")
+    # remove everything except dirname
+    class_to_attrs = {Path(k).name: [Path(p).name for p in v] for k, v in class_to_attrs.items()}
+
+    print(class_to_attrs)
+    # save to txt
+    with open(base_img_out_dir / "replacement_attrs.txt", "w") as f:
+        for k, v in class_to_attrs.items():
+            f.write(f"{k};{v}\n")
 
 
 
+def write_base_images(CUB_dataset: CUBDataset, SUB_dataset: DatasetDict, base_img_out_dir: Path, bird_labels_path: str):
     matches_df = compute_or_load_matches_df(
-        cache_path=cache_path,
         cub=CUB_dataset,
         sub=SUB_dataset,
         bird_labels_path=bird_labels_path,
@@ -347,19 +308,114 @@ def main():
 
     )
 
-    # after you computed/loaded matches_df (and still have CUB_dataset available)
-    ref_index_df = export_reference_images(
+    ref_index_df = save_base_images_for_topk_attrs(
         matches_df=matches_df,
         cub_dataset=CUB_dataset,
-        assets_dir=assets_dir,
+        out_root=base_img_out_dir,
     )
+
     # save  df
     save_df(
         ref_index_df,
-        Path(assets_dir) / "reference_images_index.csv"
+        Path(base_img_out_dir) / "base_images_index.csv"
     )
     print(ref_index_df.head(10))
 
+
+def extract_label_information(cub_dataset: Any, out_dir:Path):
+    out_images_root = ensure_dir(out_dir / "images")
+    out_attr_root = ensure_dir(out_dir / "attributes")
+
+    ref_df = pd.read_csv(out_images_root / "base_images_index.csv")
+    # filter 'image_src_path' solumn for unique entries
+    ref_df = ref_df.drop_duplicates(subset=["image_src_path"]).reset_index(drop=True)
+
+    images_txt = []
+    labels_txt = []
+    split_txt = []
+    image_attr_rows = []
+
+    next_img_id = 1
+
+    # attr_id 1..312 in the same order as cub.attribute_names / cub.attr_matrix columns
+    num_attrs = len(cub_dataset.attribute_names)
+
+    for _, row in ref_df.iterrows():
+        src_path = row["image_src_path"]
+        dst_path = row["image_dst_path"]
+
+        info = cub_dataset.get_info_from_image_path(src_path)
+
+        # destination filepath to store in images.txt: relative to new dataset images/
+        dst_path = os.path.abspath(dst_path)
+        dst_rel = os.path.relpath(dst_path, out_images_root)
+
+        # ids and split
+        images_txt.append((next_img_id, dst_rel))
+        labels_txt.append((next_img_id, int(info["class_id"])))
+        split_txt.append((next_img_id, 1))  # mark as train by convention
+
+        # write per-image attribute rows in CUB format:
+        # img_id attr_id is_present certainty time
+        # we set certainty=1, time=0.0 (placeholders, but valid numeric fields)
+        attrs = info["attributes"]  # float tensor of 0/1
+        for a in range(num_attrs):
+            present = int(attrs[a].item() >= 0.5)
+            image_attr_rows.append((next_img_id, a + 1, present, 1, 0.0))
+
+        next_img_id += 1
+
+    # write core files
+    pd.DataFrame(images_txt).to_csv(
+        out_dir / "images.txt", sep=" ", index=False, header=False
+    )
+    pd.DataFrame(labels_txt).to_csv(
+        out_dir / "image_class_labels.txt", sep=" ", index=False, header=False
+    )
+    pd.DataFrame(split_txt).to_csv(
+        out_dir / "train_test_split.txt", sep=" ", index=False, header=False
+    )
+
+    # write attributes file
+    pd.DataFrame(image_attr_rows).to_csv(
+        out_attr_root / "image_attribute_labels.txt", sep=" ", index=False, header=False
+    )
+
+    print(f"Wrote {next_img_id - 1} samples.")
+    print(f"Wrote {len(image_attr_rows)} attribute rows.")
+
+
+
+#############################################################
+
+
+def main():
+    bird_labels_path = "local_datasets/bird_labels.pkl"
+    assets_dir = "/home/jonas/PycharmProjects/flux2/assets"
+
+    out_dir = ensure_dir("/home/jonas/PycharmProjects/flux2/outputs/syn_cub_dataset")
+    base_img_out_dir = ensure_dir(out_dir / "images")
+
+    cub_data_dir = "/data/jonas/CUB"
+    CUB_dataset = CUBDataset(
+        cub_data_dir,
+        split="all",
+        transform=None,
+        return_segmentation=False,
+    )
+    SUB_dataset = load_dataset("Jessica-bader/SUB")
+
+    # write_base_images(CUB_dataset, SUB_dataset, base_img_out_dir, bird_labels_path)
+    classes_path = CUB_dataset.class_names_txt
+    shutil.copy2(classes_path, out_dir / "classes.txt")
+    attributes_names_txt = CUB_dataset.attributes_names_txt
+    shutil.copy2(attributes_names_txt, out_dir / "attributes" / "attributes.txt")
+    class_attributes_txt = CUB_dataset.class_attributes_txt
+    shutil.copy2(class_attributes_txt, out_dir / "attributes" / "class_attribute_labels_continuous.txt")
+
+    # write_replacement_attrs(base_img_out_dir)
+    #
+    # extract_label_information(cub_dataset=CUB_dataset, out_dir=out_dir)
 
 
 

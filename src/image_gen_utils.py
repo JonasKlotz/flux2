@@ -54,29 +54,45 @@ def split_attr(a: str):
     return k, v
 
 
-def describe_attr_A(a: str) -> str:
-    k, v = split_attr(a)
-    v_txt = ATTR_VALUE_TO_TEXT.get(v, v.replace("_", " "))
-    k_txt = k.replace("has_", "").replace("_", " ")
-    if k_txt == "primary color":
-        return f"the bird's primary body color"
-    return f"'{k_txt}'"
 
-def describe_attr_B(a: str) -> str:
+def describe_attr(a: str) -> str:
     k, v = split_attr(a)
     v_txt = ATTR_VALUE_TO_TEXT.get(v, v.replace("_", " "))
     k_txt = k.replace("has_", "").replace("_", " ")
     return f"'{k_txt} is {v_txt}'"
 
-def build_prompt(anchor_attr: str, target_attr: str, class_name:str) -> str:
-    # Strong, explicit counterfactual edit instruction with strict preservation constraints.
+def build_prompt(anchor_attr: str, target_attr: str, class_name: str, family:str) -> str:
     return (
-        f"Edit the input bird photograph of a {class_name} " # add species name?
-        f"Change exactly one attribute: replace {describe_attr_A(anchor_attr)} with {describe_attr_B(target_attr)}. "
-        "Make the change unambiguous and clearly visible. However, still make the bird look realistic and natural. "
-        "Preserve the bird identity, species appearance, pose, scale, viewpoint, background, lighting, "
-        "and all other colors and patterns. "
-        "Do not add or remove objects. Do not change anything except the specified attribute."
+        "Task: counterfactual single-attribute edit.\n"
+        "Inputs: Image 1 is the base photograph to be edited. Image 2 is a reference exemplar for the target attribute only.\n"
+        f"Base subject: a {class_name} bird in Image 1.\n\n"
+
+        "Primary rule (hard priority): Preserve Image 1 exactly. Treat Image 1 as the ground-truth for identity and all pixels except the one permitted attribute.\n"
+        "Reference rule (strictly limited): Use Image 2 only to understand the visual appearance of the target attribute. "
+        "Do not copy any other details from Image 2.\n\n"
+
+        "Allowed change (exactly one): "
+        f"Replace {describe_attr(anchor_attr)} with {describe_attr(target_attr)} on the bird in Image 1. "
+        "The change must be unambiguous, localized to the attribute region, and physically plausible.\n\n"
+
+        "Invariances (must not change):\n"
+        "1. Bird identity and species-specific appearance from Image 1.\n"
+        "2. Pose, body shape, size, camera viewpoint, framing, and scale.\n"
+        "3. Background, environment, and all non-bird objects.\n"
+        "4. Lighting direction, intensity, shadows, and overall color grading.\n"
+        "5. All other colors, patterns, textures, and markings on the bird, including those adjacent to the attribute.\n"
+        "6. No additions, removals, or hallucinated objects.\n"
+        # if family does not contain color attributes, we can add a prohibition against changing colors
+        +
+        ("" if "color" in family else "7. Do not change any colors on the bird, "
+        "e.g. when we change the breast pattern to spotted or striped we want to keep the breast color from the bird in Image 1\n\n")
+        +
+        "Prohibitions (explicit negatives):\n"
+        "1. Do not change the bird’s head shape, beak shape, eye shape, feather layout, or any markings unrelated to the specified attribute.\n"
+        "2. Do not change the background or introduce new scenery.\n"
+        "3. Do not import colors, patterns, or species traits from Image 2 except the target attribute appearance.\n\n"
+
+        "Output requirement: one realistic photograph that matches Image 1 except for the single specified attribute change."
     )
 
 
@@ -154,7 +170,7 @@ def generate_image(
             # upsample_prompt_mode == "none" or invalid value
             prompt = cfg.prompt
 
-        print("Generating with prompt: ", prompt)
+        # print("Generating with prompt: ", prompt)
 
         ctx = mistral([prompt]).to(torch.bfloat16)
         ctx, ctx_ids = batched_prc_txt(ctx)
@@ -196,113 +212,6 @@ def generate_image(
 
     img = Image.fromarray((127.5 * (x + 1.0)).cpu().byte().numpy())
     return img
-
-
-def iterate_cub():
-
-
-    data_dir = "/data/jonas/CUB"
-    CUB_dataset = CUBDataset(
-        data_dir,
-        split="train",
-        transform=None,
-        return_segmentation=False,
-    )
-
-    model_name: str = "flux.2-dev"
-    debug_mode: bool = False
-    cpu_offloading: bool = True
-    assert model_name.lower() in FLUX2_MODEL_INFO, (
-        f"{model_name} is not available, choose from {FLUX2_MODEL_INFO.keys()}"
-    )
-
-    torch_device = torch.device("cuda")
-
-    mistral = load_mistral_small_embedder()
-    model = load_flow_model(
-        model_name,
-        debug_mode=debug_mode,
-        device="cpu" if cpu_offloading else torch_device,
-    )
-    ae = load_ae(model_name)
-    ae.eval()
-    mistral.eval()
-
-    out_dir = Path("output")
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Minimal verbalization to make prompts clear and grounded.
-    # For unknown values, fall back to the raw attribute string.
-
-
-    for class_id in range(1, 201):
-        results, anchor_attr, relevant_attr_names, required_attr_names = get_prototypical_images_for_class(
-            CUB_dataset,
-            class_id=class_id,
-            top_k=5,
-            top_m_attrs=50,
-            require_top_r=0,
-        )
-
-        class_name = CUB_dataset.class_names[CUB_dataset.class_names["class_id"] == class_id]["class_name"].values[0]
-        print("class_id:", class_id)
-        print("class_name:", class_name)
-        print("anchor_attr:", anchor_attr)
-        print("n_selected:", len(results))
-
-        # Replace anchor with its opposite; skip if not mappable.
-        if anchor_attr not in OPPOSITE_ATTR:
-            print("Skipping class: anchor_attr has no opposite mapping:", anchor_attr)
-            continue
-
-        target_attr = OPPOSITE_ATTR[anchor_attr]
-        prompt = build_prompt(anchor_attr, target_attr)
-        print("target_attr:", target_attr)
-        print("prompt:", prompt)
-
-        for dataset_idx, img_id, cohesion in results:
-            row = CUB_dataset.data.iloc[dataset_idx]
-            print(f"  img_id: {img_id}, filepath: {row['filepath']}, cohesion: {cohesion:.4f}")
-
-            img, label, attrs, idx = CUB_dataset[dataset_idx]
-            pil = to_pil(img).convert("RGB")
-
-            with tempfile.TemporaryDirectory() as td:
-                p = Path(td) / f"cub_{dataset_idx}.png"
-                pil.save(p)
-
-                # Use a deterministic per-image seed for reproducibility.
-                seed = int(img_id)
-
-                gen_img = generate_image(
-                    prompt=prompt,
-                    input_images=str(p),
-                    match_image_size=0,
-                    num_steps=40,
-                    guidance=3.0,
-                    torch_device=torch_device,
-                    mistral=mistral,
-                    model=model,
-                    ae=ae,
-                    seed=seed,
-                )
-
-            torch.cuda.empty_cache()
-
-            # Optional quick visual sanity check.
-            # pil.show()
-            # gen_img.show()
-
-            safe_class = str(class_name).replace("/", "_")
-            out_orig = out_dir / f"cub_class{class_id}_{safe_class}_img{img_id}_{anchor_attr.replace('::','_')}_orig.png"
-            out_gen = out_dir / f"cub_class{class_id}_{safe_class}_img{img_id}_{anchor_attr.replace('::','_')}__TO__{target_attr.replace('::','_')}_gen.png"
-
-            pil.save(out_orig, quality=95, subsampling=0)
-            gen_img.save(out_gen, quality=95, subsampling=0)
-
-            print(f"Saved {out_orig}")
-            print(f"Saved {out_gen}")
-
 
 def _jaccard(u, v, eps=1e-9):
     inter = np.logical_and(u == 1, v == 1).sum()

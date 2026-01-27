@@ -1,10 +1,12 @@
 import csv
 import os
+from typing import Literal
 
 import pandas as pd
 import rootutils
 import torch
 from PIL import Image
+from pandas import DataFrame, Series
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset
 from torchvision import transforms
@@ -29,36 +31,79 @@ class CUBDataset(Dataset):
         self.transform = transform
         self.return_segmentation = return_segmentation
 
-        # Load images, split flags, and class labels
-        images_txt = os.path.join(root, "images.txt")
-        split_txt = os.path.join(root, "train_test_split.txt")
-        labels_txt = os.path.join(root, "image_class_labels.txt")
-        class_names_txt = os.path.join(root, "classes.txt")
-        class_attributes_txt = os.path.join(
-            root, "attributes", f"class_attribute_labels_continuous_recal_{split}.txt"
-        )
-        attributes_names_txt = os.path.join(root, "attributes", "attributes.txt")
-        attr_labels_txt = os.path.join(root, "attributes", "image_attribute_labels.txt")
+        self.set_paths(root)
 
-
-        images = pd.read_csv(images_txt, sep=" ", names=["img_id", "filepath"])
-        split_flags = pd.read_csv(split_txt, sep=" ", names=["img_id", "is_train"])
-        labels = pd.read_csv(labels_txt, sep=" ", names=["img_id", "class_id"])
+        images = pd.read_csv(self.images_txt, sep=" ", names=["img_id", "filepath"])
+        split_flags = pd.read_csv(self.split_txt, sep=" ", names=["img_id", "is_train"])
+        labels = pd.read_csv(self.labels_txt, sep=" ", names=["img_id", "class_id"])
         self.class_names = pd.read_csv(
-            class_names_txt, sep=" ", names=["class_id", "class_name"]
+            self.class_names_txt, sep=" ", names=["class_id", "class_name"]
         )
         self.class_names["class_name"] = self.class_names["class_name"].apply(
             lambda s: s.split(".", 1)[1]
         )
-        attribute_names_df = pd.read_csv(
-            attributes_names_txt, sep=" ", header=None, names=["attr_id", "attr_name"]
-        )
-        self.attribute_names = {}
-        for _, row in attribute_names_df.iterrows():
-            self.attribute_names[row["attr_id"]-1] = row["attr_name"]
+        self._load_attr_names()
 
-        if split != "all":
-            self.class_attributes = pd.read_csv(class_attributes_txt, sep=" ", header=None)
+
+        self.class_attributes_txt = os.path.join(
+            root, "attributes", f"class_attribute_labels_continuous.txt"
+        )
+        self.class_attributes = pd.read_csv(self.class_attributes_txt, sep=" ", header=None)
+
+
+        df = self._load_data(images, labels, seed, split, split_flags, val_split)
+
+        # 3 build attribute‐presence matrix exactly as before
+        attr_names_txt = os.path.join(root, "attributes", "attributes.txt")
+        self.attr_map = {}
+        with open(attr_names_txt, "r") as f:
+            for line in f:
+                aid, name = line.strip().split(" ", 1)
+                self.attr_map[int(aid)] = name
+
+        records = []
+        with open(self.attr_labels_txt, "r") as f:
+            reader = csv.reader(f, delimiter=" ", skipinitialspace=True)
+            for row in reader:
+                if len(row) != 5:
+                    continue
+                img_id, a_id, present, certainty, _ = row
+                if only_attributes_with_high_certainty and int(certainty) < 4:
+                    present = 0
+                records.append((int(img_id), self.attr_map[int(a_id)], int(present)))
+        attr_df = pd.DataFrame(
+            records, columns=["img_id", "attribute_name", "is_present"]
+        )
+        self.all_info_df = df.merge(attr_df, on="img_id")
+        # drop filepath and is_train for the all_info_df
+        self.all_info_df = self.all_info_df.drop(columns=["filepath", "is_train"])
+        # replace class_id with class_name from class_names df
+        mapping = self.class_names.set_index("class_id")["class_name"]
+        self.all_info_df["class_name"] = self.all_info_df["class_id"].map(mapping)
+        # check duplicates
+
+        self.build_attr_matrix(attr_df)
+
+    # build the matrix once (e.g., in __init__ or a loader)
+    def build_attr_matrix(self, attr_df):
+        # canonical attribute id order and corresponding names
+        self.attr_ids = sorted(self.attr_map)
+        self.attribute_names = [self.attr_map[i] for i in self.attr_ids]
+
+        # ensure unique (img_id, attribute_name) pairs
+        attr_df = attr_df.drop_duplicates(subset=["img_id", "attribute_name"], keep="last")
+
+        # pivot to (img_id x attribute_name) and enforce canonical column order
+        self.attr_matrix = (
+            attr_df.pivot(index="img_id", columns="attribute_name", values="is_present")
+            .fillna(0)
+            .astype(int)
+            .reindex(columns=self.attribute_names, fill_value=0)
+        )
+
+
+    def _load_data(self, images: DataFrame, labels: DataFrame, seed: int, split: Literal["all"] | str,
+                   split_flags: DataFrame, val_split: float) -> Series:
         df = images.merge(split_flags, on="img_id").merge(labels, on="img_id")
 
         # official train or test partition
@@ -90,41 +135,25 @@ class CUBDataset(Dataset):
         self.data = df.loc[chosen].reset_index(drop=True)
         # keep a mapping so that __getitem__ can map new idx -> original position in df
         self.indices = chosen
+        return df
 
-        # 3 build attribute‐presence matrix exactly as before
-        attr_names_txt = os.path.join(root, "attributes", "attributes.txt")
-        self.attr_map = {}
-        with open(attr_names_txt, "r") as f:
-            for line in f:
-                aid, name = line.strip().split(" ", 1)
-                self.attr_map[int(aid)] = name
-
-        records = []
-        with open(attr_labels_txt, "r") as f:
-            reader = csv.reader(f, delimiter=" ", skipinitialspace=True)
-            for row in reader:
-                if len(row) != 5:
-                    continue
-                img_id, a_id, present, certainty, _ = row
-                if only_attributes_with_high_certainty and int(certainty) < 3:
-                    present = 0
-                records.append((int(img_id), self.attr_map[int(a_id)], int(present)))
-        attr_df = pd.DataFrame(
-            records, columns=["img_id", "attribute_name", "is_present"]
+    def _load_attr_names(self):
+        attribute_names_df = pd.read_csv(
+            self.attributes_names_txt, sep=" ", header=None, names=["attr_id", "attr_name"]
         )
-        self.all_info_df = df.merge(attr_df, on="img_id")
-        # drop filepath and is_train for the all_info_df
-        self.all_info_df = self.all_info_df.drop(columns=["filepath", "is_train"])
-        # replace class_id with class_name from class_names df
-        mapping = self.class_names.set_index("class_id")["class_name"]
-        self.all_info_df["class_name"] = self.all_info_df["class_id"].map(mapping)
-        # check duplicates
-        if attr_df.duplicated().any():
-            attr_df = attr_df.drop_duplicates()
-        matrix = attr_df.reset_index(drop=True).pivot(
-            index="img_id", columns="attribute_name", values="is_present"
-        ).fillna(0)
-        self.attr_matrix = matrix
+        self.attribute_names = {}
+        for _, row in attribute_names_df.iterrows():
+            self.attribute_names[row["attr_id"] - 1] = row["attr_name"]
+
+    def set_paths(self, root):
+        # Load images, split flags, and class labels
+        self.images_txt = os.path.join(root, "images.txt")
+        self.split_txt = os.path.join(root, "train_test_split.txt")
+        self.labels_txt = os.path.join(root, "image_class_labels.txt")
+        self.class_names_txt = os.path.join(root, "classes.txt")
+
+        self.attributes_names_txt = os.path.join(root, "attributes", "attributes.txt")
+        self.attr_labels_txt = os.path.join(root, "attributes", "image_attribute_labels.txt")
 
     def __len__(self):
         return len(self.data)
@@ -173,9 +202,10 @@ class CUBDataset(Dataset):
         return class_name
 
     def attributes_to_names(self, attrs_tensor, threshold=0.5):
-        # Find indices where attribute is present (value == 1) and map to names
-        present_idx = (attrs_tensor == 1).nonzero(as_tuple=True)[0].tolist()
+        # attrs_tensor: shape (312,) aligned with self.attribute_names
+        present_idx = (attrs_tensor >= threshold).nonzero(as_tuple=True)[0].tolist()
         return [self.attribute_names[i] for i in present_idx]
+
 
 
     def get_info_from_image_path(self, image_path: str):
@@ -238,7 +268,6 @@ class CUBDataset(Dataset):
             raise RuntimeError(f"Attribute matrix has no entry for img_id={img_id} ({rel_path}).")
 
         attrs = torch.tensor(self.attr_matrix.loc[img_id].values, dtype=torch.float32)
-        attr_names = self.attribute_names["attr_name"].tolist()
 
         return {
             "img_id": img_id,
@@ -246,7 +275,6 @@ class CUBDataset(Dataset):
             "class_id": class_id,
             "class_name": class_name,
             "attributes": attrs,
-            "attribute_names": attr_names,
         }
 
 

@@ -23,6 +23,7 @@ dependencies = [
   "rootutils>=1.0.7",
   "datasets>=4.4.2",
   "matplotlib>=3.10.8",
+  "lightning>=2.6.0",
 ]
 
 [project.optional-dependencies]
