@@ -131,7 +131,7 @@ def generate_image(
     apply_updates(cfg, updates)
     if prompt is not None:
         cfg.prompt = prompt
-    print_config(cfg)
+    # print_config(cfg)
     img = None
 
     # Load input images first to potentially match dimensions

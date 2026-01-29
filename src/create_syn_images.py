@@ -22,21 +22,14 @@ ATTR_FALLBACK = {
     "has_breast_pattern::spotted": "has_breast_pattern::striped",
 }
 
-import argparse
-
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--start_idx", type=int, default=1, help="1-based inclusive")
-    p.add_argument("--end_idx", type=int, default=None, help="1-based inclusive")
-    p.add_argument("--shard_name", type=str, default=None, help="optional identifier for filenames")
-    return p.parse_args()
-
-
 def main():
     cub_root = Path("/home/jonas/PycharmProjects/flux2/outputs/syn_cub_dataset")
     out_images_root = ensure_dir(cub_root / "synthetic_images")
     out_attr_root = ensure_dir(cub_root / "attributes")
     reference_image_paths = cub_root / "reference_images"
+    # finally write updated attributes file (overwrite)
+    out_file = out_attr_root / "syn_image_attribute_labels.txt"
+
     # load all dir names in reference_image_paths
     class_dirs = [
         d.name for d in reference_image_paths.iterdir() if d.is_dir()
@@ -110,7 +103,8 @@ def main():
 
             if len(candidate_attr_names) == 0:
                 candidate_attr_names = [ATTR_FALLBACK.get(attr_to_replace)]
-
+            if len(candidate_attr_names) > 2:
+                candidate_attr_names = candidate_attr_names[:2] # we restrict to 2 replacements for speed
             for new_attr_name in candidate_attr_names:
                 print(f" - Replacing attribute '{attr_to_replace}' with '{new_attr_name}'")
                 # attribute to replace must exist in CUB
@@ -140,6 +134,7 @@ def main():
                 ref_image_path = Path(reference_images_for_new_attr[random_idx])
                 # load reference image
                 ref_img = Image.open(ref_image_path).convert("RGB")
+                ref_stem = ref_image_path.stem
 
                 prompt = build_prompt(attr_to_replace, new_attr_name, class_name, family=fam)
                 # print(prompt)
@@ -151,7 +146,7 @@ def main():
 
                 out_orig_path = save_dir / f"{old_stem}_orig.png"
                 out_syn_path = save_dir / f"{old_stem}_syn.png"
-                out_ref_path = save_dir / f"{old_stem}_ref.png"
+                out_ref_path = save_dir / f"{old_stem}_ref_{ref_stem}.png"
 
                 # generate synthetic
 
@@ -188,11 +183,8 @@ def main():
                 print(f"Saved: {out_orig_path}")
                 print(f"Saved: {out_syn_path}")
 
-
-    # finally write updated attributes file (overwrite)
-    out_file = out_attr_root / "syn_image_attribute_labels.txt"
-    pd.DataFrame(image_attr_rows).to_csv(out_file, sep=" ", index=False, header=False)
-    print(f"Wrote updated attributes to: {out_file}")
+        pd.DataFrame(image_attr_rows).to_csv(out_file, sep=" ", index=False, header=False)
+        print(f"Wrote updated attributes to: {out_file}")
 
 
 def load_reference_image(new_attr_name: str | Any, reference_image_files: dict[Any, Any]) -> ImageFile:

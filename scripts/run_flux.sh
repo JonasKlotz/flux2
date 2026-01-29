@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=80
 #SBATCH --mem=128G
-#SBATCH --time=96:00:00
+#SBATCH --time=150:00:00
 
 
 export PROJECT_ROOT="/home/jonas/PycharmProjects/flux2"
