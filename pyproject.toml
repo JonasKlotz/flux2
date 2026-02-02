@@ -24,6 +24,8 @@ dependencies = [
   "datasets>=4.4.2",
   "matplotlib>=3.10.8",
   "lightning>=2.6.0",
+  "opencv-python>=4.13.0.90",
+  "pycocotools>=2.0.11",
 ]
 
 [project.optional-dependencies]

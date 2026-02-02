@@ -10,6 +10,6 @@
 
 export PROJECT_ROOT="/home/jonas/PycharmProjects/flux2"
 source "$PROJECT_ROOT/.venv/bin/activate"
-
+cd $PROJECT_ROOT
 # run create synthetic_images.py with arguments
 python "src/create_syn_images.py"
