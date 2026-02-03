@@ -14,6 +14,9 @@ from local_datasets.cub_dataset import CUBDataset
 from prepare_image_generation import family
 import lightning
 
+
+
+
 # fix all seeds for reproducibility
 SEED = 42
 lightning.seed_everything(SEED)
@@ -22,13 +25,21 @@ ATTR_FALLBACK = {
     "has_breast_pattern::spotted": "has_breast_pattern::striped",
 }
 
+def write_row(f, row):
+    # space-separated, newline-terminated
+    f.write(" ".join(map(str, row)) + "\n")
+
 def main():
+    # input paths
     cub_root = Path("/home/jonas/PycharmProjects/flux2/outputs/syn_cub_dataset")
     out_images_root = ensure_dir(cub_root / "synthetic_images")
     out_attr_root = ensure_dir(cub_root / "attributes")
     reference_image_paths = cub_root / "reference_images"
-    # finally write updated attributes file (overwrite)
-    out_file = out_attr_root / "syn_image_attribute_labels.txt"
+
+    # output paths
+    syn_image_attribute_labels_path = out_attr_root / "syn_image_attribute_labels.txt"
+    syn_images_path = cub_root / "syn_images.txt"
+    syn_image_class_labels_path = cub_root / "syn_image_class_labels.txt"
 
     # load all dir names in reference_image_paths
     class_dirs = [
@@ -79,112 +90,163 @@ def main():
     ae = load_ae(model_name)
     ae.eval()
     mistral.eval()
-
-    # build updated image_attribute_labels.txt rows
-    # format: img_id attr_id present certainty time
-    image_attr_rows = []
     next_img_id = 1  # will assign ids for saved images in this script
 
-    for idx in range(len(cub_base)):
-        print(f"Processing image {idx + 1} / {len(cub_base)}")
-        img, label, attrs, key = cub_base[idx]
-        class_name = cub_base.label_to_class_name(label)
-        image_path = cub_base.get_image_path(idx)
-        img.show()
-        attrs_to_replace = replacement_attr_dict.get(class_name)
-        for attr_to_replace in attrs_to_replace:
+    # overwrite once
+    syn_image_attribute_labels_path = Path(syn_image_attribute_labels_path)
+    syn_images_path = Path(syn_images_path)
+    syn_image_class_labels_path = Path(syn_image_class_labels_path)
 
-            # choose a new attribute within the same family (based on SUB list)
-            fam = family(attr_to_replace)
-            candidate_attr_names = [
-                a for a in sub_attr_names
-                if family(a) == fam and a != attr_to_replace
-            ]
+    with (
+        syn_image_attribute_labels_path.open("w") as f_attr,
+        syn_images_path.open("w") as f_images,
+        syn_image_class_labels_path.open("w") as f_cls,
+    ):
+        start_idx = 0
+        end_idx = 600
+        for idx in range(start_idx, end_idx):
+            print(f"Processing image {idx + 1} / {len(cub_base)}")
+            img, label, attrs, key = cub_base[idx]
+            attribute_names = cub_base.attributes_to_names(attrs)
+            label_idx = torch.argmax(label).item()
+            class_name = cub_base.label_to_class_name(label)
+            image_path = cub_base.get_image_path(idx)
+            attrs_to_replace = replacement_attr_dict.get(class_name)
 
-            if len(candidate_attr_names) == 0:
-                candidate_attr_names = [ATTR_FALLBACK.get(attr_to_replace)]
-            if len(candidate_attr_names) > 2:
-                candidate_attr_names = candidate_attr_names[:2] # we restrict to 2 replacements for speed
-            for new_attr_name in candidate_attr_names:
-                print(f" - Replacing attribute '{attr_to_replace}' with '{new_attr_name}'")
-                # attribute to replace must exist in CUB
-                if attr_to_replace not in cub_attr_to_idx:
-                    raise RuntimeError(
-                        f"Attribute to replace '{attr_to_replace}' does not exist in CUB attribute space."
+            for attr_to_replace in attrs_to_replace:
+
+                # choose a new attribute within the same family (based on SUB list)
+                fam = family(attr_to_replace)
+                candidate_attr_names = [
+                    a for a in sub_attr_names
+                    if family(a) == fam and a != attr_to_replace
+                ]
+
+                if len(candidate_attr_names) == 0:
+                    candidate_attr_names = [ATTR_FALLBACK.get(attr_to_replace)]
+
+                if len(candidate_attr_names) > 2:
+                    candidate_attr_names = candidate_attr_names[:2] # we restrict to 2 replacements for speed
+                for new_attr_name in candidate_attr_names:
+                    print(f" - Replacing attribute '{attr_to_replace}' with '{new_attr_name}'")
+                    # attribute to replace must exist in CUB
+                    if attr_to_replace not in cub_attr_to_idx:
+                        raise RuntimeError(
+                            f"Attribute to replace '{attr_to_replace}' does not exist in CUB attribute space."
+                        )
+
+                    # new attribute must exist in CUB, otherwise fallback or fail
+                    if new_attr_name not in cub_attr_to_idx:
+                        fallback = ATTR_FALLBACK.get(attr_to_replace)
+                        if fallback is None:
+                            raise RuntimeError(
+                                f"No valid replacement found for '{attr_to_replace}'. "
+                                f"Candidate '{new_attr_name}' not in CUB and no fallback defined."
+                            )
+                        if fallback not in cub_attr_to_idx:
+                            raise RuntimeError(
+                                f"Fallback attribute '{fallback}' for '{attr_to_replace}' "
+                                f"does not exist in CUB attribute space."
+                            )
+                        new_attr_name = fallback
+
+                    reference_images_for_new_attr = reference_image_files.get(new_attr_name)
+                    # sample one reference image if multiple are available
+                    random_idx = torch.randint(0, len(reference_images_for_new_attr), (1,)).item()
+                    ref_image_path = Path(reference_images_for_new_attr[random_idx])
+                    # load reference image
+                    ref_img = Image.open(ref_image_path).convert("RGB")
+                    ref_stem = ref_image_path.stem
+
+                    prompt = build_prompt(attr_to_replace, new_attr_name, class_name, family=fam)
+                    # print(prompt)
+
+                    # save paths: classname/attrthatwaschanged/{oldname}_syn and _orig
+                    old_stem = Path(image_path).stem  # safe even if key is numeric; then stem==key
+                    safe_attr_dir = attr_to_replace.replace("/", "_")
+                    save_dir = ensure_dir(out_images_root / class_name / f"{safe_attr_dir}_to_{new_attr_name}")
+
+                    out_orig_path = save_dir / f"{old_stem}_orig.png"
+                    out_syn_path = save_dir / f"{old_stem}_syn.png"
+                    out_ref_path = save_dir / f"{old_stem}_ref_{ref_stem}.png"
+
+                    # generate synthetic
+
+
+                    gen_img = generate_image(
+                        prompt=prompt,
+                        input_images=f"{str(image_path)},{str(ref_image_path)}",
+                        match_image_size=0,
+                        num_steps=40,
+                        guidance=3.0,
+                        torch_device=torch_device,
+                        mistral=mistral,
+                        model=model,
+                        ae=ae,
+                        seed=SEED,
                     )
 
-                # new attribute must exist in CUB, otherwise fallback or fail
-                if new_attr_name not in cub_attr_to_idx:
-                    fallback = ATTR_FALLBACK.get(attr_to_replace)
-                    if fallback is None:
-                        raise RuntimeError(
-                            f"No valid replacement found for '{attr_to_replace}'. "
-                            f"Candidate '{new_attr_name}' not in CUB and no fallback defined."
-                        )
-                    if fallback not in cub_attr_to_idx:
-                        raise RuntimeError(
-                            f"Fallback attribute '{fallback}' for '{attr_to_replace}' "
-                            f"does not exist in CUB attribute space."
-                        )
-                    new_attr_name = fallback
+                    torch.cuda.empty_cache()
 
-                reference_images_for_new_attr = reference_image_files.get(new_attr_name)
-                # sample one reference image if multiple are available
-                random_idx = torch.randint(0, len(reference_images_for_new_attr), (1,)).item()
-                ref_image_path = Path(reference_images_for_new_attr[random_idx])
-                # load reference image
-                ref_img = Image.open(ref_image_path).convert("RGB")
-                ref_stem = ref_image_path.stem
+                    # save images
+                    gen_img.save(out_syn_path)
+                    img.save(out_orig_path)
+                    # also save the reference image used
+                    ref_img.save(out_ref_path)
+                    ########################################################################################################
+                    # update attributes
+                    ########################################################################################################
+                    # build updated attribute vectors
+                    orig_attrs = attrs.clone()
+                    syn_attrs = attrs.clone()
 
-                prompt = build_prompt(attr_to_replace, new_attr_name, class_name, family=fam)
-                # print(prompt)
+                    old_i = cub_attr_to_idx[attr_to_replace] - 1
+                    new_i = cub_attr_to_idx[new_attr_name] - 1
 
-                # save paths: classname/attrthatwaschanged/{oldname}_syn and _orig
-                old_stem = Path(image_path).stem  # safe even if key is numeric; then stem==key
-                safe_attr_dir = attr_to_replace.replace("/", "_")
-                save_dir = ensure_dir(out_images_root / class_name / f"{safe_attr_dir}_to_{new_attr_name}")
+                    # assert orig_attrs[old_i] >= 0.5, f"Original attribute '{attr_to_replace}' not present in image {image_path}"
+                    # assert orig_attrs[new_i] < 0.5, f"New attribute '{new_attr_name}' already present in image {image_path}"
 
-                out_orig_path = save_dir / f"{old_stem}_orig.png"
-                out_syn_path = save_dir / f"{old_stem}_syn.png"
-                out_ref_path = save_dir / f"{old_stem}_ref_{ref_stem}.png"
+                    # enforce replacement: old off, new on
+                    syn_attrs[old_i] = 0.0
+                    syn_attrs[new_i] = 1.0
 
-                # generate synthetic
+                    # write attributes for BOTH images (orig and syn) into updated file
+                    # assign new sequential ids
+                    orig_img_id = next_img_id
+                    syn_img_id = next_img_id + 1
 
 
-                gen_img = generate_image(
-                    prompt=prompt,
-                    input_images=f"{str(image_path)},{str(ref_image_path)}",
-                    match_image_size=0,
-                    num_steps=40,
-                    guidance=3.0,
-                    torch_device=torch_device,
-                    mistral=mistral,
-                    model=model,
-                    ae=ae,
-                    seed=SEED,
-                )
+                    # next_img_id += 2
+                    # # take only parentparent/parent/filename for outpaths
+                    # out_orig_path = Path("/".join(out_orig_path.parts[-3:]))
+                    # out_syn_path = Path("/".join(out_syn_path.parts[-3:]))
+                    # # images.txt rows
+                    # write_row(f_images, (orig_img_id, str(out_orig_path), syn_img_id))
+                    # write_row(f_images, (syn_img_id, str(out_syn_path), orig_img_id))
+                    #
+                    # # image_class_labels.txt rows
+                    # write_row(f_cls, (orig_img_id, label_idx))
+                    # write_row(f_cls, (syn_img_id, label_idx))
+                    #
+                    # certainty = 4
+                    # time_val = 0.0
+                    #
+                    # # image_attribute_labels.txt rows (orig)
+                    # for a_id in range(len(cub_attr_names)):
+                    #     present = int(orig_attrs[a_id].item() >= 0.5)
+                    #     write_row(f_attr, (orig_img_id, a_id + 1, present, certainty, time_val))
+                    #
+                    # # image_attribute_labels.txt rows (syn)
+                    # for a_id in range(len(cub_attr_names)):
+                    #     present = int(syn_attrs[a_id].item() >= 0.5)
+                    #     write_row(f_attr, (syn_img_id, a_id + 1, present, certainty, time_val))
 
-                torch.cuda.empty_cache()
+                    # crash-safety option:
+                    # f_attr.flush(); f_images.flush(); f_cls.flush()
 
-                # save images
-                gen_img.save(out_syn_path)
-                img.save(out_orig_path)
-                # also save the reference image used
-                ref_img.save(out_ref_path)
+    print(f"Saved: {out_orig_path}")
+    print(f"Saved: {out_syn_path}")
 
-                update_new_attributes(attr_to_replace,
-                                      attrs,
-                                      cub_attr_names,
-                                      cub_attr_to_idx,
-                                      image_attr_rows,
-                                      new_attr_name,
-                                      next_img_id)
-
-                print(f"Saved: {out_orig_path}")
-                print(f"Saved: {out_syn_path}")
-
-        pd.DataFrame(image_attr_rows).to_csv(out_file, sep=" ", index=False, header=False)
-        print(f"Wrote updated attributes to: {out_file}")
 
 
 def load_reference_image(new_attr_name: str | Any, reference_image_files: dict[Any, Any]) -> ImageFile:

@@ -405,7 +405,7 @@ def main():
     )
     SUB_dataset = load_dataset("Jessica-bader/SUB")
 
-    # write_base_images(CUB_dataset, SUB_dataset, base_img_out_dir, bird_labels_path)
+    write_base_images(CUB_dataset, SUB_dataset, base_img_out_dir, bird_labels_path)
     classes_path = CUB_dataset.class_names_txt
     shutil.copy2(classes_path, out_dir / "classes.txt")
     attributes_names_txt = CUB_dataset.attributes_names_txt
@@ -413,9 +413,9 @@ def main():
     class_attributes_txt = CUB_dataset.class_attributes_txt
     shutil.copy2(class_attributes_txt, out_dir / "attributes" / "class_attribute_labels_continuous.txt")
 
-    # write_replacement_attrs(base_img_out_dir)
-    #
-    # extract_label_information(cub_dataset=CUB_dataset, out_dir=out_dir)
+    write_replacement_attrs(base_img_out_dir)
+
+    extract_label_information(cub_dataset=CUB_dataset, out_dir=out_dir)
 
 
 
