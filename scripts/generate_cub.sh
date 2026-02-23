@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=flux2_syn_images
-#SBATCH --output=logs/main-%j.out
-#SBATCH --error=logs/main-%j.err
+#SBATCH --output=logs/cub/main-%j.out
+#SBATCH --error=logs/cub/main-%j.err
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=80
+#SBATCH --cpus-per-task=25
 #SBATCH --mem=128G
 #SBATCH --time=150:00:00
 

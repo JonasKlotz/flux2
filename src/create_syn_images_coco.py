@@ -27,100 +27,6 @@ lightning.seed_everything(SEED)
 
 from collections import defaultdict
 from typing import List, Dict, Any, Optional, Tuple
-
-import torch
-
-COCO_REPLACE_MAP = {
-    "person": "bicycle",               # weak: human replaced by nearby object, but street context plausible
-    "bicycle": "motorcycle",
-    "car": "truck",
-    "motorcycle": "bicycle",
-    "airplane": "bus",                 # weak: airport shuttle bus is plausible context
-    "bus": "train",
-    "train": "bus",
-    "truck": "car",
-    "boat": "truck",                   # weak: marina truck is plausible, but not ideal
-    "traffic light": "stop sign",
-    "fire hydrant": "stop sign",
-    "stop sign": "traffic light",
-    "parking meter": "fire hydrant",   # weak but street context consistent
-    "bench": "chair",
-
-    "bird": "cat",                     # weak: outdoor animal swap; better would be "dog" but choose one
-    "cat": "dog",
-    "dog": "cat",
-    "horse": "cow",
-    "sheep": "cow",
-    "cow": "sheep",
-    "elephant": "giraffe",
-    "bear": "dog",                     # weak
-    "zebra": "horse",
-    "giraffe": "elephant",
-
-    "backpack": "handbag",
-    "umbrella": "backpack",            # weak but street context plausible
-    "handbag": "backpack",
-    "tie": "backpack",                 # weak: clothing accessory swap is hard within COCO set
-    "suitcase": "backpack",
-
-    "frisbee": "sports ball",
-    "skis": "snowboard",
-    "snowboard": "skis",
-    "sports ball": "frisbee",
-    "kite": "frisbee",                 # weak
-    "baseball bat": "tennis racket",
-    "baseball glove": "sports ball",
-    "skateboard": "surfboard",         # weak but board-like
-    "surfboard": "skateboard",
-    "tennis racket": "baseball bat",
-
-    "bottle": "cup",
-    "wine glass": "cup",
-    "cup": "wine glass",
-    "fork": "spoon",
-    "knife": "fork",
-    "spoon": "fork",
-    "bowl": "cup",
-
-    "banana": "apple",
-    "apple": "orange",
-    "sandwich": "hot dog",
-    "orange": "apple",
-    "broccoli": "carrot",
-    "carrot": "broccoli",
-    "hot dog": "sandwich",
-    "pizza": "cake",                   # weak but food context ok
-    "donut": "cake",
-    "cake": "donut",
-
-    "chair": "couch",
-    "couch": "bed",
-    "potted plant": "vase",
-    "bed": "couch",
-    "dining table": "chair",           # weak: table to chair changes scene logic, but indoor context ok
-    "toilet": "sink",
-    "tv": "laptop",
-    "laptop": "tv",
-    "mouse": "remote",
-    "remote": "cell phone",
-    "keyboard": "laptop",
-    "cell phone": "remote",
-
-    "microwave": "oven",
-    "oven": "microwave",
-    "toaster": "microwave",
-    "sink": "toilet",
-    "refrigerator": "oven",            # weak but kitchen context ok
-
-    "book": "clock",
-    "clock": "book",
-    "vase": "potted plant",
-    "scissors": "knife",
-    "teddy bear": "cat",               # weak
-    "hair drier": "toothbrush",        # weak: bathroom context, but scale mismatch
-    "toothbrush": "hair drier",        # weak
-}
-
 import json
 import os
 from pathlib import Path
@@ -128,49 +34,41 @@ from typing import Dict, Any, List
 import numpy as np
 
 
-def atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
-    path = Path(path)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+import json
+from pathlib import Path
+from typing import Iterable, List
+import pandas as pd
+
+import argparse
 
 
-def init_or_load_coco_attr_json(
-    anno_path: Path,
-    dataset,
-) -> Dict[str, Any]:
-    """
-    COCO-like JSON extended with image-level attributes.
-    """
-    anno_path = Path(anno_path)
-    if anno_path.exists():
-        with open(anno_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # basic sanity
-        for k in ["images", "categories", "image_attributes"]:
-            if k not in data:
-                raise KeyError(f"Missing key '{k}' in existing annotation file: {anno_path}")
-        return data
+import torch
 
-    categories = []
-    for cls_idx, coco_id in enumerate(dataset.cat_ids):
-        categories.append(
-            {
-                "id": int(coco_id),
-                "name": dataset.get_class_name(cls_idx),
-                "supercategory": "none",
-            }
+
+
+
+def present_indices(mlc_vector: torch.Tensor) -> List[int]:
+    # robust for any shape (C,) or (1,C) etc.
+    v = mlc_vector.detach().cpu().view(-1)
+    return torch.nonzero(v, as_tuple=False).view(-1).tolist()
+
+def labels_to_json(indices: Iterable[int]) -> str:
+    # stable, parseable, no CSV delimiter issues
+    return json.dumps(list(map(int, indices)), ensure_ascii=False)
+
+from filelock import FileLock
+import pandas as pd
+
+def append_metadata_row_locked(csv_path, row):
+    lock = FileLock(str(csv_path) + ".lock")
+    with lock:
+        write_header = not csv_path.exists()
+        pd.DataFrame([row]).to_csv(
+            csv_path,
+            mode="a",
+            header=write_header,
+            index=False,
         )
-
-    return {
-        "info": {"description": "Synthetic COCO with image-level attribute labels"},
-        "licenses": [],
-        "images": [],
-        "categories": categories,
-        "annotations": [],        # kept empty intentionally (no instance labels for synthetic)
-        "image_attributes": [],   # custom: image-level multi-labels
-    }
 
 
 def mlc_to_attr_entries(
@@ -200,18 +98,7 @@ def mlc_to_attr_entries(
     return entries
 
 
-def flip_remove_add_in_mlc(
-    mlc_vector,
-    remove_cls_idx: int,
-    add_cls_idx: int,
-):
-    """
-    Returns a new tensor-like vector with exactly these two edits applied (idempotent).
-    """
-    v = mlc_vector.clone()
-    v[remove_cls_idx] = 0
-    v[add_cls_idx] = 1
-    return v
+
 
 
 def add_image_record(data: Dict[str, Any], image_id: int, file_name: str, width: int, height: int) -> None:
@@ -280,7 +167,7 @@ def select_class_with_fewest_instances_and_area(
         n = len(cand)
         area_sum = sum(ann_area(a) for a in cand)
 
-        key = (n, area_sum)
+        key = (n, -area_sum)  # negative area to maximize it
         if best is None or key < best:
             best = key
             best_payload = (cls_idx, coco_cat_id, dataset.get_class_name(cls_idx), cand, n, area_sum)
@@ -322,48 +209,23 @@ Prohibitions (explicit negatives):
 Output requirement: One realistic photograph that matches the original image in every respect except that all instances of {target_class} are absent and the scene has been plausibly completed where they used to be.
 """.strip()
 
+def parse_args():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--start_idx", type=int, default=0, help="Inclusive start index")
+    ap.add_argument("--end_idx", type=int, default=None, help="Exclusive end index (default: len(dataset))")
+    return ap.parse_args()
 
-def build_prompt_remove_and_add_coco(label_to_remove: str, label_to_add: str) -> str:
-    return f"""
-Task: counterfactual object-class substitution edit.
 
-Input: A single base photograph to be edited.
-
-Primary rule (hard priority): Preserve the input image exactly. Treat the original photo as ground truth for camera viewpoint, framing, background, and all objects except those belonging to the target class.
-
-Target substitution (the only allowed semantic change):
-Replace every visible instance of "{label_to_remove}" with an instance of "{label_to_add}". There might be only a single instance or multiple instances of "{label_to_remove}"; all must be replaced.
-
-Localization constraint:
-The substitutions must occur only at the locations where "{label_to_remove}" appears in the original image. Do not introduce "{label_to_add}" in any new locations. Do not remove or alter any object that is not "{label_to_remove}".
-
-Geometric and physical plausibility:
-Each new "{label_to_add}" must be consistent with the original scene geometry and perspective. Match the original object placement, approximate size, and viewpoint as closely as possible. If an exact pose transfer is impossible, apply the minimal geometric adjustment needed to keep the result physically plausible, while keeping the rest of the image unchanged.
-
-Appearance and realism constraints:
-Maintain photorealism. Keep global illumination, color grading, and atmosphere unchanged. Only adjust local shadows, reflections, and contact regions strictly required by the substituted objects.
-
-Invariances (must not change):
-1. Camera viewpoint, framing, scale, and perspective.
-2. Background, environment, and scene layout.
-3. All objects and regions that are not "{label_to_remove}".
-4. Number of objects outside the substituted regions. No new objects. No deletions besides removing "{label_to_remove}" via substitution.
-
-Prohibitions:
-1. No stylization. No blur. No artifacts. No text. No watermarks.
-2. Do not change weather, time of day, or overall lighting.
-3. Do not modify the shapes, identities, or positions of non-target objects.
-
-Output requirement: One realistic photograph that matches the original image in every respect except that all "{label_to_remove}" instances have been replaced by "{label_to_add}" in-place.
-""".strip()
 
 def main():
+    args = parse_args()
     coco_path = "/data/jonas/COCO"
     coco_train_path = os.path.join(coco_path, "train2017")
     annotation_file = os.path.join(
         coco_path, "annotations_trainval2017/annotations/instances_train2017.json"
     )
-    output_dir = Path(ensure_dir("/home/jonas/PycharmProjects/flux2/outputs/syn_coco_images"))
+    output_dir = ensure_dir("/home/jonas/PycharmProjects/flux2/outputs/syn_coco_images")
+    output_image_dir = ensure_dir(output_dir / "images")
 
     dataset = COCODataset(
         root_dir=coco_train_path,
@@ -372,11 +234,9 @@ def main():
         normalize=True,
     )
 
-    name_to_cls_idx = build_name_to_cls_idx(dataset)
-
-    anno_out = output_dir / "coco_synthetic_image_attributes.json"
-    coco_attr_data = init_or_load_coco_attr_json(anno_out, dataset)
-
+    # choose a run-specific name so multiple runs do not overwrite
+    metadata_csv = output_dir / "metadata.csv"
+    
     model_name: str = "flux.2-dev"
     debug_mode: bool = False
     cpu_offloading: bool = True
@@ -392,11 +252,18 @@ def main():
     ae.eval()
     mistral.eval()
 
-    for i in range(15,35):
+    start_idx = int(args.start_idx)
+    end_idx = len(dataset) if args.end_idx is None else int(args.end_idx)
+
+    # clamp to valid range
+    start_idx = max(0, min(start_idx, len(dataset)))
+    end_idx = max(0, min(end_idx, len(dataset)))
+
+
+    for i in range(start_idx, end_idx):
         img, bboxes, masks, category_ids, mlc_vector, anns, idx = dataset[i]
 
         pil_img = Image.fromarray((img.numpy().transpose(1, 2, 0) * 255).astype(np.uint8))
-        width, height = pil_img.size
 
         selection = select_class_with_fewest_instances_and_area(mlc_vector, anns, dataset)
         if selection is None:
@@ -404,24 +271,22 @@ def main():
             if isinstance(pos, int):
                 pos = [pos]
             cls_idx = pos[0]
-            coco_cat_id = int(dataset.cat_ids[cls_idx])
-            label_name = dataset.get_class_name(cls_idx)
-            candidate_anns = [a for a in anns if int(a["category_id"]) == coco_cat_id]
+
         else:
-            cls_idx, coco_cat_id, label_name, candidate_anns, n_inst, tot_area = selection
+            cls_idx, _, _, _, _, _ = selection
 
         label_to_remove = dataset.get_class_name(cls_idx)
-        label_to_add = COCO_REPLACE_MAP[label_to_remove]
-        add_cls_idx = name_to_cls_idx[label_to_add]
+        # label_to_add = COCO_REPLACE_MAP[label_to_remove]
+        # add_cls_idx = name_to_cls_idx[label_to_add]
 
-        prompt = build_prompt_remove_and_add_coco(label_to_remove, label_to_add)
-
+        # prompt = build_prompt_remove_and_add_coco(label_to_remove, label_to_add)
+        prompt = build_prompt_remove_all_coco(label_to_remove)
         # file names
-        orig_file = f"{idx}_orig_.png"
-        syn_file = f"{idx}_removed{label_to_remove}_add{label_to_add}_syn.png"
+        orig_file = f"{idx}_orig.png"
+        syn_file = f"{idx}_removed{label_to_remove}_syn.png"
 
-        orig_image_path = output_dir / orig_file
-        gen_image_path = output_dir / syn_file
+        orig_image_path = output_image_dir / orig_file
+        gen_image_path = output_image_dir / syn_file
 
         # generate synthetic
         with tempfile.TemporaryDirectory() as tmpdirname:
@@ -445,29 +310,31 @@ def main():
         pil_img.save(orig_image_path)
         gen_img.save(gen_image_path)
 
-        # add COCO-like records
-        orig_id = int(idx)
-        syn_id = int(idx) + 1_000_000_000
+        # synthetic labels: only remove
+        syn_mlc =mlc_vector.clone()
+        syn_mlc[cls_idx] = 0
 
-        add_image_record(coco_attr_data, orig_id, orig_file, width, height)
-        add_image_record(coco_attr_data, syn_id, syn_file, width, height)
+        orig_idx_list = present_indices(mlc_vector)
+        syn_idx_list = present_indices(syn_mlc)
+        if len(orig_idx_list) == 0 or max(orig_idx_list) >= len(dataset.cat_ids):
+            print(f"Warning: class index out of bounds for image {idx}, skipping metadata entry.")
+            continue
 
-        # original labels unchanged
-        orig_attr_entries = mlc_to_attr_entries(orig_id, mlc_vector, dataset)
-
-        # synthetic labels: only remove + add
-        syn_mlc = flip_remove_add_in_mlc(mlc_vector, remove_cls_idx=cls_idx, add_cls_idx=add_cls_idx)
-        syn_attr_entries = mlc_to_attr_entries(syn_id, syn_mlc, dataset)
-
-        append_attr_entries(coco_attr_data, orig_attr_entries)
-        append_attr_entries(coco_attr_data, syn_attr_entries)
-
-        # persist after every sample (crash-safe)
-        atomic_write_json(anno_out, coco_attr_data)
+        row = {
+            "coco_idx": int(idx),
+            "orig_path": str(orig_image_path),
+            "orig_labels": labels_to_json(orig_idx_list),
+            "syn_path": str(gen_image_path),
+            "syn_labels": labels_to_json(syn_idx_list),
+            "removed_cls_idx": int(cls_idx),
+            "removed_class": str(label_to_remove),
+        }
+        append_metadata_row_locked(metadata_csv, row)
 
         torch.cuda.empty_cache()
 
 
 
 if __name__ == "__main__":
+
     main()

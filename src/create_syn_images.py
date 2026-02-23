@@ -104,6 +104,7 @@ def main():
     ):
         start_idx = 0
         end_idx = 600
+
         for idx in range(start_idx, end_idx):
             print(f"Processing image {idx + 1} / {len(cub_base)}")
             img, label, attrs, key = cub_base[idx]
@@ -114,7 +115,10 @@ def main():
             attrs_to_replace = replacement_attr_dict.get(class_name)
 
             for attr_to_replace in attrs_to_replace:
-
+                if attr_to_replace not in attribute_names:
+                    # attribute not present in this image, skip
+                    print(f" - Skipping attribute '{attr_to_replace}' as it is not present in the image.")
+                    continue
                 # choose a new attribute within the same family (based on SUB list)
                 fam = family(attr_to_replace)
                 candidate_attr_names = [
@@ -127,6 +131,7 @@ def main():
 
                 if len(candidate_attr_names) > 2:
                     candidate_attr_names = candidate_attr_names[:2] # we restrict to 2 replacements for speed
+
                 for new_attr_name in candidate_attr_names:
                     print(f" - Replacing attribute '{attr_to_replace}' with '{new_attr_name}'")
                     # attribute to replace must exist in CUB
@@ -216,33 +221,33 @@ def main():
                     syn_img_id = next_img_id + 1
 
 
-                    # next_img_id += 2
-                    # # take only parentparent/parent/filename for outpaths
-                    # out_orig_path = Path("/".join(out_orig_path.parts[-3:]))
-                    # out_syn_path = Path("/".join(out_syn_path.parts[-3:]))
-                    # # images.txt rows
-                    # write_row(f_images, (orig_img_id, str(out_orig_path), syn_img_id))
-                    # write_row(f_images, (syn_img_id, str(out_syn_path), orig_img_id))
-                    #
-                    # # image_class_labels.txt rows
-                    # write_row(f_cls, (orig_img_id, label_idx))
-                    # write_row(f_cls, (syn_img_id, label_idx))
-                    #
-                    # certainty = 4
-                    # time_val = 0.0
-                    #
-                    # # image_attribute_labels.txt rows (orig)
-                    # for a_id in range(len(cub_attr_names)):
-                    #     present = int(orig_attrs[a_id].item() >= 0.5)
-                    #     write_row(f_attr, (orig_img_id, a_id + 1, present, certainty, time_val))
-                    #
-                    # # image_attribute_labels.txt rows (syn)
-                    # for a_id in range(len(cub_attr_names)):
-                    #     present = int(syn_attrs[a_id].item() >= 0.5)
-                    #     write_row(f_attr, (syn_img_id, a_id + 1, present, certainty, time_val))
+                    next_img_id += 2
+                    # take only parentparent/parent/filename for outpaths
+                    out_orig_path = Path("/".join(out_orig_path.parts[-3:]))
+                    out_syn_path = Path("/".join(out_syn_path.parts[-3:]))
+                    # images.txt rows
+                    write_row(f_images, (orig_img_id, str(out_orig_path), syn_img_id))
+                    write_row(f_images, (syn_img_id, str(out_syn_path), orig_img_id))
+
+                    # image_class_labels.txt rows
+                    write_row(f_cls, (orig_img_id, label_idx))
+                    write_row(f_cls, (syn_img_id, label_idx))
+
+                    certainty = 4
+                    time_val = 0.0
+
+                    # image_attribute_labels.txt rows (orig)
+                    for a_id in range(len(cub_attr_names)):
+                        present = int(orig_attrs[a_id].item() >= 0.5)
+                        write_row(f_attr, (orig_img_id, a_id + 1, present, certainty, time_val))
+
+                    # image_attribute_labels.txt rows (syn)
+                    for a_id in range(len(cub_attr_names)):
+                        present = int(syn_attrs[a_id].item() >= 0.5)
+                        write_row(f_attr, (syn_img_id, a_id + 1, present, certainty, time_val))
 
                     # crash-safety option:
-                    # f_attr.flush(); f_images.flush(); f_cls.flush()
+                    f_attr.flush(); f_images.flush(); f_cls.flush()
 
     print(f"Saved: {out_orig_path}")
     print(f"Saved: {out_syn_path}")
